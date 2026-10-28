@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Page Replacement Simulator - LRU, OPT and E-LRU</title>
+<style>
+*{box-sizing:border-box}body{font-family:Calibri,Arial,sans-serif;margin:0;background:#f4f6fa;color:#1f2933}
+header{background:#1f3864;color:#fff;padding:14px 22px}header h1{margin:0;font-size:20px}header p{margin:3px 0 0;font-size:13px;opacity:.85}
+main{padding:16px 22px;max-width:1200px;margin:auto}
+.panel{background:#fff;border:1px solid #d0d7e2;border-radius:6px;padding:14px;margin-bottom:14px}
+.panel h2{margin:0 0 10px;font-size:15px;color:#1f3864}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+label{display:block;font-size:12px;font-weight:bold;margin-bottom:3px}
+input,select{padding:6px 8px;border:1px solid #b6bfcc;border-radius:4px;font-size:13px}
+#refs{width:380px}#frames{width:80px}
+button{background:#2e5aa8;color:#fff;border:0;border-radius:4px;padding:8px 16px;font-size:13px;cursor:pointer}
+.hint{font-size:11px;color:#5b6573;margin-top:6px}.err{color:#c0392b;font-size:12px;margin-top:6px;min-height:15px}
+.tiles{display:flex;gap:10px;flex-wrap:wrap}.tile{flex:1;min-width:150px;background:#eef2fa;border-radius:5px;padding:8px 10px}
+.tile b{display:block;font-size:11px;color:#5b6573}.tile span{font-size:17px;font-weight:bold;color:#1f3864}
+#cmp{margin-top:10px;font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.grid.two{grid-template-columns:repeat(2,1fr)}.grid.one{grid-template-columns:1fr}
+.scroll{max-height:330px;overflow:auto}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th{position:sticky;top:0;background:#d9e2f3;padding:4px 6px;text-align:center}
+td{padding:3px 6px;text-align:center;border-bottom:1px solid #e3e8f0}
+tr.hit td{background:#e2f4e5}tr.fault td{background:#fbe3e6}
+.hidden{display:none}
+@media(max-width:800px){.grid,.grid.two{grid-template-columns:1fr}#refs{width:100%}}
+</style></head><body>
+<header><h1>Page Replacement Simulator</h1><p>Traditional (LRU, Optimal) versus research-based E-LRU (Tareef et al., 2025)</p></header>
+<main>
+<section class="panel"><h2>Simulation Input</h2>
+<div class="row">
+<div><label for="refs">Page reference string</label><input id="refs" value="7, 0, 1, 2, 0, 3, 0, 4, 2, 3, 0, 3, 2"></div>
+<div><label for="frames">Frames</label><input id="frames" type="number" min="1" value="3"></div>
+<div><label for="algo">Algorithm</label><select id="algo">
+<option value="all">Compare all three</option><option value="lru">LRU only</option><option value="opt">Optimal (OPT) only</option><option value="elru">E-LRU only</option><option value="lruelru">LRU vs E-LRU</option></select></div>
+<button id="run">Run simulation</button></div>
+<div class="hint">Enter non-negative integers separated by commas, spaces or semicolons.</div><div class="err" id="err"></div></section>
+<section class="panel"><h2>Performance Summary</h2><div class="tiles" id="tiles"></div><div id="cmp"></div></section>
+<section class="grid" id="grid"></section>
+</main>
+<script>
+"use strict";
+function parseReferences(text){
+  if(!text.trim()) throw new Error("Enter at least one page reference.");
+  return text.trim().split(/[\s,;]+/).filter(Boolean).map(t=>{
+    if(!/^\d+$/.test(t)) throw new Error('Invalid page value "'+t+'". Use non-negative integers (0, 1, 2, ...).');
+    if(t.length>9) throw new Error('Page value "'+t+'" is too large.');
+    return Number(t);});
+}
+function validateFrameCount(v){
+  if(String(v).trim()==="") throw new Error("Enter the number of frames.");
+  const n=Number(v); if(!Number.isInteger(n)||n<1) throw new Error("Frame count must be a positive whole number.");
+  return n;
+}
+function simulateLRU(pages,f){
+  const frames=[],last=new Map(),trace=[];
+  pages.forEach((page,i)=>{
+    const hit=frames.includes(page);let victim=null;
+    if(!hit){ if(frames.length<f) frames.push(page);
+      else{ victim=frames.reduce((o,r)=>last.get(r)<last.get(o)?r:o,frames[0]); frames[frames.indexOf(victim)]=page; } }
+    last.set(page,i); trace.push({page,frames:[...frames],hit,victim,note:""});
+  });return trace;
+}
+function simulateOptimal(pages,f){
+  const frames=[],trace=[];
+  pages.forEach((page,i)=>{
+    const hit=frames.includes(page);let victim=null;
+    if(!hit){ if(frames.length<f) frames.push(page);
+      else{ let far=-1; frames.forEach(r=>{const nx=pages.indexOf(r,i+1);const d=nx===-1?Infinity:nx;if(d>far){far=d;victim=r;}});
+        frames[frames.indexOf(victim)]=page; } }
+    trace.push({page,frames:[...frames],hit,victim,note:""});
+  });return trace;
+}
+/* E-LRU: victim = minimum TNR; ties -> modified page (M=1, most recently modified first), else LRU */
+function simulateELRU(pages,f){
+  const tnr=new Map();pages.forEach(p=>tnr.set(p,(tnr.get(p)||0)+1));   // TNR over the whole string
+  const frames=[],last=new Map(),M=new Map(),modTime=new Map(),trace=[];
+  pages.forEach((page,i)=>{
+    const hit=frames.includes(page);let victim=null,note="";
+    if(hit){ M.set(page,1);modTime.set(page,i);last.set(page,i); }       // hit sets the modified bit
+    else{
+      if(frames.length<f){ frames.push(page);M.set(page,0); }
+      else{
+        const min=Math.min(...frames.map(r=>tnr.get(r)));
+        const tied=frames.filter(r=>tnr.get(r)===min);
+        if(tied.length===1){ victim=tied[0];note="lowest TNR"; }
+        else{
+          const mod=tied.filter(r=>M.get(r)===1);
+          if(mod.length===0){ victim=tied.reduce((o,r)=>last.get(r)<last.get(o)?r:o);note="TNR tie, M=0: LRU"; }
+          else if(mod.length===1){ victim=mod[0];note="TNR tie: modified page"; }
+          else{ victim=mod.reduce((o,r)=>modTime.get(r)>modTime.get(o)?r:o);note="TNR tie: latest modified"; }
+          if(M.get(victim)===1) frames.forEach(r=>M.set(r,0));           // reset all M bits
+        }
+        frames[frames.indexOf(victim)]=page;M.set(page,0);
+      }
+      last.set(page,i);
+    }
+    trace.push({page,frames:[...frames],hit,victim,note});
+  });return trace;
+}
+function summarize(t){const h=t.filter(x=>x.hit).length;return{faults:t.length-h,hits:h,hitRatio:t.length?h/t.length*100:0,faultRatio:t.length?(t.length-h)/t.length*100:0};}
+function renderTrace(t,f,showNote){
+  let h='<table><tr><th>Step</th><th>Page</th><th>Frames</th><th>Result</th><th>Victim</th>'+(showNote?'<th>Rule used</th>':'')+'</tr>';
+  t.forEach((s,i)=>{const fr=[...s.frames];while(fr.length<f)fr.push("-");
+    h+=`<tr class="${s.hit?'hit':'fault'}"><td>${i+1}</td><td>${s.page}</td><td>${fr.join(" | ")}</td><td>${s.hit?"Hit":"Page Fault"}</td><td>${s.victim===null?"-":s.victim}</td>${showNote?`<td>${s.note||"-"}</td>`:""}</tr>`;});
+  return h+"</table>";
+}
+const NAMES={lru:"LRU",opt:"Optimal (OPT)",elru:"E-LRU"};
+function runSimulation(){
+  const err=document.getElementById("err");err.textContent="";
+  try{
+    const pages=parseReferences(document.getElementById("refs").value);
+    const f=validateFrameCount(document.getElementById("frames").value);
+    const a=document.getElementById("algo").value;
+    const sel=a==="all"?["lru","opt","elru"]:a==="lruelru"?["lru","elru"]:[a];
+    const fn={lru:simulateLRU,opt:simulateOptimal,elru:simulateELRU};
+    const res={};sel.forEach(k=>{const t=fn[k](pages,f);res[k]={t,s:summarize(t)};});
+    let tiles=`<div class="tile"><b>Total references</b><span>${pages.length}</span></div><div class="tile"><b>Frames</b><span>${f}</span></div>`;
+    sel.forEach(k=>tiles+=`<div class="tile"><b>${NAMES[k]} faults / hits</b><span>${res[k].s.faults} / ${res[k].s.hits}</span></div>`);
+    document.getElementById("tiles").innerHTML=tiles;
+    let c=sel.map(k=>`${NAMES[k]} hit ratio ${res[k].s.hitRatio.toFixed(1)} %`).join("; ")+".";
+    if(res.lru&&res.elru){const d=res.lru.s.faults-res.elru.s.faults;c+=` E-LRU ${d>0?"saves "+d+" fault"+(d>1?"s":"")+" compared with":d<0?"causes "+(-d)+" more fault"+(d<-1?"s":"")+" than":"matches"} LRU.`;}
+    if(res.opt&&res.elru){c+=` E-LRU is ${res.elru.s.faults-res.opt.s.faults} fault(s) away from the OPT benchmark.`;}
+    document.getElementById("cmp").textContent=c;
+    document.getElementById("grid").className="grid "+(sel.length===3?"":sel.length===2?"two":"one");
+    document.getElementById("grid").innerHTML=sel.map(k=>`<div class="panel"><h2>${NAMES[k]} - Step-by-Step Trace</h2><div class="scroll">${renderTrace(res[k].t,f,k==="elru")}</div></div>`).join("");
+  }catch(e){err.textContent=e.message;}
+}
+document.getElementById("run").addEventListener("click",runSimulation);
+runSimulation();
+</script></body></html>
