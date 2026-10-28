@@ -25,6 +25,10 @@ th{position:sticky;top:0;background:#d9e2f3;padding:4px 6px;text-align:center}
 td{padding:3px 6px;text-align:center;border-bottom:1px solid #e3e8f0}
 tr.hit td{background:#e2f4e5}tr.fault td{background:#fbe3e6}
 .hidden{display:none}
+/* E-LRU additions only */
+td.reset{background:#ffe9b8!important;font-weight:bold}
+.tnrwrap table{width:auto;min-width:260px}.tnrwrap td,.tnrwrap th{padding:4px 14px}
+.legend{font-size:12px;color:#44505f;margin:8px 0 0;line-height:1.5}
 @media(max-width:800px){.grid,.grid.two{grid-template-columns:1fr}#refs{width:100%}}
 </style></head><body>
 <header><h1>Page Replacement Simulator</h1><p>Traditional (LRU, Optimal) versus research-based E-LRU (Tareef et al., 2025)</p></header>
@@ -38,6 +42,11 @@ tr.hit td{background:#e2f4e5}tr.fault td{background:#fbe3e6}
 <button id="run">Run simulation</button></div>
 <div class="hint">Enter non-negative integers separated by commas, spaces or semicolons.</div><div class="err" id="err"></div></section>
 <section class="panel"><h2>Performance Summary</h2><div class="tiles" id="tiles"></div><div id="cmp"></div></section>
+ 
+<section class="panel hidden" id="tnrPanel"><h2>E-LRU: TNR Table (Total Number of References)</h2>
+<div class="tnrwrap" id="tnrTable"></div>
+<div class="legend">TNR = how many times each page appears in the <b>whole</b> reference string. It is computed once before the simulation starts and never changes. On a fault, the page with the <b>lowest TNR</b> is the victim.</div></section>
+ 
 <section class="grid" id="grid"></section>
 </main>
 <script>
@@ -73,33 +82,60 @@ function simulateOptimal(pages,f){
     trace.push({page,frames:[...frames],hit,victim,note:""});
   });return trace;
 }
-/* E-LRU: victim = minimum TNR; ties -> modified page (M=1, most recently modified first), else LRU */
+ 
+/* ===== E-LRU section (only part changed) ===== */
+function computeTNR(pages){
+  const tnr=new Map();pages.forEach(p=>tnr.set(p,(tnr.get(p)||0)+1));return tnr;   // TNR over the whole string
+}
+/* victim = minimum TNR; ties -> modified page (M=1, most recently modified first), else LRU.
+   A hit sets M=1. Whenever the victim has M=1, ALL M bits are reset to 0.
+   Each step stores the M bits and TNR values of the frames for display. */
 function simulateELRU(pages,f){
-  const tnr=new Map();pages.forEach(p=>tnr.set(p,(tnr.get(p)||0)+1));   // TNR over the whole string
+  const tnr=computeTNR(pages);
   const frames=[],last=new Map(),M=new Map(),modTime=new Map(),trace=[];
   pages.forEach((page,i)=>{
-    const hit=frames.includes(page);let victim=null,note="";
-    if(hit){ M.set(page,1);modTime.set(page,i);last.set(page,i); }       // hit sets the modified bit
-    else{
-      if(frames.length<f){ frames.push(page);M.set(page,0); }
+    const hit=frames.includes(page);let victim=null,note="",reset=false;
+    if(hit){
+      M.set(page,1);modTime.set(page,i);last.set(page,i);
+      note="Hit: M of page "+page+" set to 1";
+    }else{
+      if(frames.length<f){ frames.push(page);M.set(page,0);note="Free frame: M=0"; }
       else{
         const min=Math.min(...frames.map(r=>tnr.get(r)));
         const tied=frames.filter(r=>tnr.get(r)===min);
-        if(tied.length===1){ victim=tied[0];note="lowest TNR"; }
+        if(tied.length===1){ victim=tied[0];note="Lowest TNR ("+min+")"; }
         else{
           const mod=tied.filter(r=>M.get(r)===1);
-          if(mod.length===0){ victim=tied.reduce((o,r)=>last.get(r)<last.get(o)?r:o);note="TNR tie, M=0: LRU"; }
-          else if(mod.length===1){ victim=mod[0];note="TNR tie: modified page"; }
-          else{ victim=mod.reduce((o,r)=>modTime.get(r)>modTime.get(o)?r:o);note="TNR tie: latest modified"; }
-          if(M.get(victim)===1) frames.forEach(r=>M.set(r,0));           // reset all M bits
+          const list="{"+tied.join(", ")+"}";
+          if(mod.length===0){ victim=tied.reduce((o,r)=>last.get(r)<last.get(o)?r:o);note="TNR tie "+list+", all M=0: LRU"; }
+          else if(mod.length===1){ victim=mod[0];note="TNR tie "+list+": evict the M=1 page"; }
+          else{ victim=mod.reduce((o,r)=>modTime.get(r)>modTime.get(o)?r:o);note="TNR tie "+list+", several M=1: most recently modified"; }
         }
+        if(M.get(victim)===1){ reset=true; frames.forEach(r=>M.set(r,0)); }      // victim had M=1 -> reset all
         frames[frames.indexOf(victim)]=page;M.set(page,0);
       }
       last.set(page,i);
     }
-    trace.push({page,frames:[...frames],hit,victim,note});
-  });return trace;
+    trace.push({page,frames:[...frames],hit,victim,note,reset,
+      m:frames.map(r=>M.get(r)),t:frames.map(r=>tnr.get(r))});
+  });
+  return {trace,tnr};
 }
+function pad(arr,f){const a=[...arr];while(a.length<f)a.push("-");return a.join(" | ");}
+function renderELRUTrace(t,f){
+  let h='<table><tr><th>Step</th><th>Page</th><th>Frames</th><th>M bits</th><th>TNR of frames</th><th>Result</th><th>Victim</th><th>Rule used</th><th>M reset?</th></tr>';
+  t.forEach((s,i)=>{
+    h+=`<tr class="${s.hit?'hit':'fault'}"><td>${i+1}</td><td>${s.page}</td><td>${pad(s.frames,f)}</td><td>${pad(s.m,f)}</td><td>${pad(s.t,f)}</td>`+
+       `<td>${s.hit?"Hit":"Page Fault"}</td><td>${s.victim===null?"-":s.victim}</td><td style="text-align:left">${s.note}</td>`+
+       (s.reset?`<td class="reset">Yes: all M = 0</td>`:`<td>No</td>`)+`</tr>`;});
+  return h+'</table><div class="legend"><b>M bits</b> and <b>TNR of frames</b> follow the same order as the Frames column. A hit sets that page\'s M to 1. When the victim has M = 1, every M is reset to 0 (highlighted).</div>';
+}
+function renderTNRTable(tnr){
+  const keys=[...tnr.keys()].sort((a,b)=>a-b);
+  return '<table><tr><th>Page</th>'+keys.map(k=>`<th>${k}</th>`).join("")+'</tr><tr><td><b>TNR</b></td>'+keys.map(k=>`<td>${tnr.get(k)}</td>`).join("")+'</tr></table>';
+}
+/* ===== end E-LRU section ===== */
+ 
 function summarize(t){const h=t.filter(x=>x.hit).length;return{faults:t.length-h,hits:h,hitRatio:t.length?h/t.length*100:0,faultRatio:t.length?(t.length-h)/t.length*100:0};}
 function renderTrace(t,f,showNote){
   let h='<table><tr><th>Step</th><th>Page</th><th>Frames</th><th>Result</th><th>Victim</th>'+(showNote?'<th>Rule used</th>':'')+'</tr>';
@@ -115,7 +151,7 @@ function runSimulation(){
     const f=validateFrameCount(document.getElementById("frames").value);
     const a=document.getElementById("algo").value;
     const sel=a==="all"?["lru","opt","elru"]:a==="lruelru"?["lru","elru"]:[a];
-    const fn={lru:simulateLRU,opt:simulateOptimal,elru:simulateELRU};
+    const fn={lru:simulateLRU,opt:simulateOptimal,elru:(p,fr)=>simulateELRU(p,fr).trace};
     const res={};sel.forEach(k=>{const t=fn[k](pages,f);res[k]={t,s:summarize(t)};});
     let tiles=`<div class="tile"><b>Total references</b><span>${pages.length}</span></div><div class="tile"><b>Frames</b><span>${f}</span></div>`;
     sel.forEach(k=>tiles+=`<div class="tile"><b>${NAMES[k]} faults / hits</b><span>${res[k].s.faults} / ${res[k].s.hits}</span></div>`);
@@ -124,8 +160,13 @@ function runSimulation(){
     if(res.lru&&res.elru){const d=res.lru.s.faults-res.elru.s.faults;c+=` E-LRU ${d>0?"saves "+d+" fault"+(d>1?"s":"")+" compared with":d<0?"causes "+(-d)+" more fault"+(d<-1?"s":"")+" than":"matches"} LRU.`;}
     if(res.opt&&res.elru){c+=` E-LRU is ${res.elru.s.faults-res.opt.s.faults} fault(s) away from the OPT benchmark.`;}
     document.getElementById("cmp").textContent=c;
+ 
+    const showE=(a==="elru");   // detailed E-LRU view (TNR table + M bits) only in "E-LRU only" mode
+    document.getElementById("tnrPanel").classList.toggle("hidden",!showE);
+    if(showE) document.getElementById("tnrTable").innerHTML=renderTNRTable(computeTNR(pages));
+ 
     document.getElementById("grid").className="grid "+(sel.length===3?"":sel.length===2?"two":"one");
-    document.getElementById("grid").innerHTML=sel.map(k=>`<div class="panel"><h2>${NAMES[k]} - Step-by-Step Trace</h2><div class="scroll">${renderTrace(res[k].t,f,k==="elru")}</div></div>`).join("");
+    document.getElementById("grid").innerHTML=sel.map(k=>`<div class="panel"><h2>${NAMES[k]} - Step-by-Step Trace</h2><div class="scroll">${(k==="elru"&&showE)?renderELRUTrace(res[k].t,f):renderTrace(res[k].t,f,k==="elru")}</div></div>`).join("");
   }catch(e){err.textContent=e.message;}
 }
 document.getElementById("run").addEventListener("click",runSimulation);
